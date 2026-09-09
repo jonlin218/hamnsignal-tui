@@ -2,7 +2,7 @@
 
 # Hamnsignal TUI
 
-Hamnsignal TUI is a Go terminal client for the live Hamnsignal installation.
+Hamnsignal TUI is a Go terminal client for the live [Hamnsignal](https://hamnsignal.se) installation.
 **DATA** explains the current system state; **VISUAL** turns that same state
 into an abstract Braille density field. Audio is played independently by mpv.
 
