@@ -1,3 +1,5 @@
+<img width="1680" height="1050" alt="hamnsignal-tui" src="https://github.com/user-attachments/assets/2492a7ca-a303-4e3d-9ab6-a0a93187b5d6" />
+
 # Hamnsignal TUI
 
 Hamnsignal TUI is a Go terminal client for the live Hamnsignal installation.
