@@ -57,6 +57,13 @@ type RiverState struct {
 	Fields EnvironmentalFields
 }
 
+// TrafficState is the latest E45/Oscarsleden traffic-pressure observation.
+// It uses the same environmental field shape as weather and river state.
+type TrafficState struct {
+	Envelope
+	Fields EnvironmentalFields
+}
+
 type UnknownEvent struct{ Envelope }
 
 func (e VoiceStart) Meta() Envelope   { return e.Envelope }
@@ -65,6 +72,7 @@ func (e StateUpdate) Meta() Envelope  { return e.Envelope }
 func (e LiveArrival) Meta() Envelope  { return e.Envelope }
 func (e WeatherState) Meta() Envelope { return e.Envelope }
 func (e RiverState) Meta() Envelope   { return e.Envelope }
+func (e TrafficState) Meta() Envelope { return e.Envelope }
 func (e UnknownEvent) Meta() Envelope { return e.Envelope }
 
 // VoiceFields contains the documented voice_start fields. Pointers preserve
@@ -219,6 +227,12 @@ func DecodeEvent(data []byte) (Event, error) {
 			return nil, fmt.Errorf("decode river_state fields: %w", err)
 		}
 		return RiverState{Envelope: envelope, Fields: value}, nil
+	case "traffic_state":
+		var value EnvironmentalFields
+		if err := json.Unmarshal(fields, &value); err != nil {
+			return nil, fmt.Errorf("decode traffic_state fields: %w", err)
+		}
+		return TrafficState{Envelope: envelope, Fields: value}, nil
 	default:
 		return UnknownEvent{Envelope: envelope}, nil
 	}

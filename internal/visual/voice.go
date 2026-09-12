@@ -39,6 +39,8 @@ type Presenter struct {
 	targetWindVertical              float64
 	hasRiver                        bool
 	precipitation                   float64
+	motorikPressure                 float64
+	fixture                         VisualFixture
 	lastArrivalAt                   int64
 	arrival                         *arrivalGesture
 }
@@ -46,6 +48,10 @@ type Presenter struct {
 func NewPresenter() *Presenter {
 	return &Presenter{voices: map[int64]voiceVisual{}, currentRiver: 0.5, targetRiver: 0.5}
 }
+
+// SetFixture applies development-only visual overrides without modifying the
+// live Hamnsignal state or the snapshot supplied to the presenter.
+func (p *Presenter) SetFixture(fixture VisualFixture) { p.fixture = fixture.clone() }
 
 // Sync consumes an application snapshot and updates voice lifecycle timing and
 // slowly changing environmental parameters.
@@ -108,6 +114,8 @@ func (p *Presenter) render(snapshot hamnsignal.StateSnapshot, width, height int,
 	canvas := NewCanvas(width, height)
 	field := newDensityField(width, height)
 	voiceField := newDensityField(width, height)
+	riverField := newDensityField(width, height)
+	motorikField := newDensityField(width, height)
 	ids := make([]int64, 0, len(p.voices))
 	for id := range p.voices {
 		ids = append(ids, id)
@@ -118,10 +126,15 @@ func (p *Presenter) render(snapshot hamnsignal.StateSnapshot, width, height int,
 		p.contributeVoice(&voiceField, p.voices[id], now)
 		field.add(voiceField)
 	}
-	p.contributeRiver(&field, now)
+	p.contributeRiver(&riverField, now)
+	field.add(riverField)
 	p.contributeRain(&field, now)
 	p.contributeArrival(&field, now)
+	p.contributeMotorik(&motorikField, now)
+	attenuateMotorikByRiver(&motorikField, riverField)
+	field.add(motorikField)
 	field.rasterize(&canvas)
+	p.resolveMotorikGlyphs(&canvas, motorikField, field, riverField, now)
 	if colour {
 		return canvas.RenderANSI()
 	}
@@ -237,6 +250,16 @@ func (p *Presenter) updateEnvironment(snapshot hamnsignal.StateSnapshot, now tim
 		p.precipitation = clamp(float64(*value.Fields.RawValue), 0, 10)
 	} else {
 		p.precipitation = 0
+	}
+	if p.fixture.Precipitation != nil {
+		p.precipitation = clamp(*p.fixture.Precipitation, 0, 10)
+	}
+	p.motorikPressure = 0
+	if value, ok := snapshot.Traffic["e45_queue"]; ok && value.Fields.NormalizedValue != nil {
+		p.motorikPressure = clamp(float64(*value.Fields.NormalizedValue), 0, 1)
+	}
+	if p.fixture.TrafficPressure != nil {
+		p.motorikPressure = clamp(*p.fixture.TrafficPressure, 0, 1)
 	}
 	if p.lastSync.IsZero() {
 		p.currentRiver, p.currentWindBias, p.currentWindVertical = p.targetRiver, p.targetWindBias, p.targetWindVertical

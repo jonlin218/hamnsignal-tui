@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/jonlin218/hamnsignal-tui/internal/hamnsignal"
 )
 
@@ -40,7 +41,7 @@ func TestMissingEnvironmentAndArrivalAreQuiet(t *testing.T) {
 	state := hamnsignal.StateSnapshot{Voices: map[int64]hamnsignal.Voice{}}
 	view := NewModelFromSnapshot(state, 80, 24)
 	output := view.View()
-	if !strings.Contains(output, "GÖTA ÄLV") || !strings.Contains(output, "LAST ARRIVAL") {
+	if !strings.Contains(output, "GÖTA ÄLV") || !strings.Contains(output, "TRAFFIC") || !strings.Contains(output, "LAST ARRIVAL") {
 		t.Fatalf("missing empty sections: %s", output)
 	}
 	if !strings.Contains(output, "awaiting state") {
@@ -48,16 +49,51 @@ func TestMissingEnvironmentAndArrivalAreQuiet(t *testing.T) {
 	}
 }
 
+func TestTrafficSectionShowsSpeedAndPressure(t *testing.T) {
+	state := trafficState(50.4, 0.45)
+	output := NewModelFromSnapshot(state, 80, 24).View()
+	for _, expected := range []string{"TRAFFIC", "E45 / OSCARSLEDEN", "50.4 km/h", "PRESSURE  0.45", "GÖTA ÄLV", "WEATHER", "MUSICAL STATE", "ACTIVE VOICES", "LAST ARRIVAL"} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("missing %q in DATA view: %s", expected, output)
+		}
+	}
+}
+
+func TestTrafficSectionShowsZeroPressureNeutrally(t *testing.T) {
+	output := NewModelFromSnapshot(trafficState(53.1, 0), 80, 24).View()
+	if !strings.Contains(output, "53.1 km/h") || !strings.Contains(output, "PRESSURE  0.00") {
+		t.Fatalf("zero traffic pressure was not rendered: %s", output)
+	}
+	for _, unwanted := range []string{"CLEAR", "BUSY", "HEAVY", "SEVERE", "MOTORIK"} {
+		if strings.Contains(output, unwanted) {
+			t.Fatalf("invented traffic status %q: %s", unwanted, output)
+		}
+	}
+}
+
+func TestTrafficSectionNarrowLayoutDoesNotOverflow(t *testing.T) {
+	output := NewModelFromSnapshot(trafficState(50.4, 0.45), 60, 24).View()
+	if !strings.Contains(output, "TRAFFIC") || !strings.Contains(output, "E45 / OSCARSLEDEN") {
+		t.Fatalf("traffic section missing from narrow view: %s", output)
+	}
+	for _, line := range strings.Split(output, "\n") {
+		if lipgloss.Width(line) > 60 {
+			t.Fatalf("narrow view overflowed (%d): %q", lipgloss.Width(line), line)
+		}
+	}
+}
+
 func TestSmallTerminalAndResizeRemainSafe(t *testing.T) {
-	state := hamnsignal.NewState()
-	model := NewModel(state)
-	model.width, model.height = 30, 8
+	model := NewModelFromSnapshot(trafficState(50.4, 0.45), 30, 8)
 	if !strings.Contains(model.View(), "Terminal too small") {
 		t.Fatal("small terminal message missing")
 	}
 	model.width, model.height = 120, 35
 	if strings.Contains(model.View(), "Terminal too small") {
 		t.Fatal("large terminal remained in small mode")
+	}
+	if !strings.Contains(model.View(), "TRAFFIC") {
+		t.Fatal("traffic section missing after resize")
 	}
 }
 
@@ -96,6 +132,9 @@ func NewModelFromSnapshot(snapshot hamnsignal.StateSnapshot, width, height int) 
 	for key, value := range snapshot.River {
 		state.River[key] = value
 	}
+	for key, value := range snapshot.Traffic {
+		state.Traffic[key] = value
+	}
 	for key, value := range snapshot.Semantic {
 		state.Semantic[key] = value
 	}
@@ -106,4 +145,11 @@ func NewModelFromSnapshot(snapshot hamnsignal.StateSnapshot, width, height int) 
 	model := NewModel(state)
 	model.width, model.height = width, height
 	return model
+}
+
+func trafficState(raw, pressure hamnsignal.Number) hamnsignal.StateSnapshot {
+	key := "e45_queue"
+	return hamnsignal.StateSnapshot{Traffic: map[string]hamnsignal.EnvironmentalValue{
+		key: {Fields: hamnsignal.EnvironmentalFields{Key: &key, RawValue: &raw, NormalizedValue: &pressure}},
+	}}
 }

@@ -70,15 +70,38 @@ func (p *Presenter) contributeRain(field *densityField, now time.Time) {
 		return
 	}
 	intensity := clamp(p.precipitation/5, 0, 1)
-	count := int(math.Ceil(intensity * 8))
+	count := rainTraceCount(p.precipitation)
 	for index := 0; index < count; index++ {
 		seed := stableSeed(int64(index+1)*7919 + int64(field.width*31+field.height))
 		age := math.Mod(now.Sub(time.Unix(0, 0)).Seconds()/1.2+float64(stableByte(seed, 0))/255, 1)
-		x := (float64(stableByte(seed, 1))/255 + p.currentWindBias*age*1.2) * float64(field.width)
+		baseX := rainBasePosition(seed, index, count)
+		// At very narrow virtual widths the existing sub-dot Gaussian can miss
+		// every sample after stratification. Preserve the old seeded placement
+		// there so rain degrades visibly and safely rather than disappearing.
+		if field.width < 80 {
+			baseX = float64(stableByte(seed, 1)) / 255
+		}
+		x := (baseX + p.currentWindBias*age*1.2) * float64(field.width)
 		y := age * float64(field.height)
 		sx := float64(field.width) * 0.004
 		sy := float64(field.height) * 0.018
 		strength := (0.028 + intensity*0.018) * (1 - age*0.45)
 		field.addGaussian(x, y, sx, sy, strength, rainColor)
 	}
+}
+
+func rainTraceCount(precipitation float64) int {
+	return int(math.Ceil(clamp(precipitation/5, 0, 1) * 8))
+}
+
+// rainBasePosition stratifies the existing deterministic seed across the
+// available atmosphere. The seed remains the local jitter; only its base
+// horizontal distribution is broadened, before the unchanged wind offset.
+func rainBasePosition(seed uint32, index, count int) float64 {
+	if count <= 0 {
+		return .5
+	}
+	const margin = .02
+	jitter := float64(stableByte(seed, 1)) / 255
+	return margin + (1-2*margin)*(float64(index)+.45+jitter*.10)/float64(count)
 }

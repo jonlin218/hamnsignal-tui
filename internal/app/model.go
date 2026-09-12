@@ -3,6 +3,8 @@
 package app
 
 import (
+	"fmt"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -32,10 +34,17 @@ type Model struct {
 	help        bool
 	audio       string
 	toggleAudio func() error
+	fixture     visual.VisualFixture
 }
 
-func NewModel(state *hamnsignal.State, audioStatus string) Model {
-	return Model{state: state, data: data.NewModel(state, audioStatus), presenter: visual.NewPresenter(), width: 80, height: 24, audio: audioStatus}
+func NewModel(state *hamnsignal.State, audioStatus string, fixtures ...visual.VisualFixture) Model {
+	fixture := visual.VisualFixture{}
+	if len(fixtures) > 0 {
+		fixture = fixtures[0]
+	}
+	presenter := visual.NewPresenter()
+	presenter.SetFixture(fixture)
+	return Model{state: state, data: data.NewModel(state, audioStatus), presenter: presenter, width: 80, height: 24, audio: audioStatus, fixture: fixture}
 }
 
 func (m *Model) SetAudioToggle(toggle func() error) {
@@ -83,16 +92,32 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) View() string {
+	var content string
 	if m.view == VisualView {
 		if m.help {
-			return m.visualView() + "\n\n" + visualHelp(m.width)
+			content = m.visualView() + "\n\n" + visualHelp(m.width)
+		} else {
+			content = m.visualView()
 		}
-		return m.visualView()
+	} else if m.help {
+		content = m.data.View() + "\n\n" + dataHelp(m.width)
+	} else {
+		content = m.data.View()
 	}
-	if m.help {
-		return m.data.View() + "\n\n" + dataHelp(m.width)
+	parts := make([]string, 0, 3)
+	if m.fixture.TrafficPressure != nil {
+		parts = append(parts, fmt.Sprintf("TRAFFIC %.2f", *m.fixture.TrafficPressure))
 	}
-	return m.data.View()
+	if m.fixture.Precipitation != nil {
+		parts = append(parts, fmt.Sprintf("RAIN %.2f", *m.fixture.Precipitation))
+	}
+	if m.fixture.MotorikClick {
+		parts = append(parts, "MOTORIK CLICK")
+	}
+	if len(parts) > 0 {
+		return content + "\nVISUAL FIXTURE — " + strings.Join(parts, " — ")
+	}
+	return content
 }
 
 func (m Model) visualView() string {

@@ -6,6 +6,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/jonlin218/hamnsignal-tui/internal/hamnsignal"
+	"github.com/jonlin218/hamnsignal-tui/internal/visual"
 )
 
 func TestViewSwitchingAndHelp(t *testing.T) {
@@ -29,6 +30,56 @@ func TestViewSwitchingAndHelp(t *testing.T) {
 	model = updated.(Model)
 	if !strings.Contains(model.View(), "TAB switch view") {
 		t.Fatal("help did not include view controls")
+	}
+}
+
+func TestVisualTrafficFixtureLeavesDataTruthfulAndIsIndicated(t *testing.T) {
+	state := hamnsignal.NewState()
+	key, livePressure := "e45_queue", hamnsignal.Number(0)
+	state.Traffic[key] = hamnsignal.EnvironmentalValue{Fields: hamnsignal.EnvironmentalFields{Key: &key, NormalizedValue: &livePressure}}
+	fixture := .8
+	model := NewModel(state, "disabled", visual.VisualFixture{TrafficPressure: &fixture})
+	output := model.View()
+	if !strings.Contains(output, "PRESSURE  0.00") || !strings.Contains(output, "VISUAL FIXTURE — TRAFFIC 0.80") {
+		t.Fatalf("fixture obscured truthful DATA: %s", output)
+	}
+	if value := *state.Snapshot().Traffic[key].Fields.NormalizedValue; value != 0 {
+		t.Fatalf("fixture mutated central traffic state: %v", value)
+	}
+
+	ordinary := NewModel(state, "disabled")
+	if strings.Contains(ordinary.View(), "VISUAL FIXTURE") {
+		t.Fatal("ordinary startup displayed a fixture indicator")
+	}
+}
+
+func TestMotorikClickFixtureIsIndicatedWithoutChangingData(t *testing.T) {
+	state := hamnsignal.NewState()
+	model := NewModel(state, "disabled", visual.VisualFixture{MotorikClick: true})
+	if output := model.View(); !strings.Contains(output, "VISUAL FIXTURE — MOTORIK CLICK") || strings.Contains(output, "PRESSURE") {
+		t.Fatalf("unexpected click fixture presentation: %s", output)
+	}
+	pressure := .8
+	combined := NewModel(state, "disabled", visual.VisualFixture{TrafficPressure: &pressure, MotorikClick: true})
+	if output := combined.View(); !strings.Contains(output, "TRAFFIC 0.80 — MOTORIK CLICK") {
+		t.Fatalf("combined fixture indication missing: %s", output)
+	}
+}
+
+func TestRainFixtureLeavesLiveDataTruthfulAndComposes(t *testing.T) {
+	state := hamnsignal.NewState()
+	key, liveRain := "precipitation", hamnsignal.Number(0)
+	state.Weather[key] = hamnsignal.EnvironmentalValue{Fields: hamnsignal.EnvironmentalFields{Key: &key, RawValue: &liveRain}}
+	rain, traffic := .8, .5
+	model := NewModel(state, "disabled", visual.VisualFixture{TrafficPressure: &traffic, Precipitation: &rain, MotorikClick: true})
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 160, Height: 35})
+	model = updated.(Model)
+	output := model.View()
+	if !strings.Contains(output, "precipitation    0.00 mm") || !strings.Contains(output, "TRAFFIC 0.50 — RAIN 0.80 — MOTORIK CLICK") {
+		t.Fatalf("rain fixture obscured live DATA or indication: %s", output)
+	}
+	if value := *state.Snapshot().Weather[key].Fields.RawValue; value != 0 {
+		t.Fatalf("rain fixture mutated central weather state: %v", value)
 	}
 }
 

@@ -59,6 +59,12 @@ func TestDecodeKnownEventsAndOptionalFields(t *testing.T) {
 				t.Fatal("missing key should remain optional")
 			}
 		}},
+		{"traffic", `{"type":"traffic_state","fields":{"key":"e45_queue","label":"e45Queue","layer":"live","normalized_value":0.45,"observed_at_unix_ms":1789139152648,"raw_value":50.4,"source":"trafikverket_traffic_flow","future":true}}`, func(t *testing.T, event Event) {
+			e, ok := event.(TrafficState)
+			if !ok || e.Fields.Key == nil || *e.Fields.Key != "e45_queue" || e.Fields.Label == nil || *e.Fields.Label != "e45Queue" || e.Fields.RawValue == nil || *e.Fields.RawValue != 50.4 || e.Fields.NormalizedValue == nil || *e.Fields.NormalizedValue != 0.45 || e.Fields.ObservedAtUnixMS == nil || *e.Fields.ObservedAtUnixMS != 1789139152648 {
+				t.Fatalf("unexpected traffic: %#v", event)
+			}
+		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -68,6 +74,19 @@ func TestDecodeKnownEventsAndOptionalFields(t *testing.T) {
 			}
 			tc.check(t, event)
 		})
+	}
+}
+
+func TestDecodeTrafficStateOptionalFieldsAndNumericStrings(t *testing.T) {
+	event := mustEvent(t, `{"type":"traffic_state","fields":{"key":"e45_queue","raw_value":"53.1","normalized_value":"0","observed_at_unix_ms":"1789139152648"}}`)
+	traffic, ok := event.(TrafficState)
+	if !ok || traffic.Fields.Label != nil || traffic.Fields.RawValue == nil || *traffic.Fields.RawValue != 53.1 || traffic.Fields.NormalizedValue == nil || *traffic.Fields.NormalizedValue != 0 || traffic.Fields.ObservedAtUnixMS == nil || *traffic.Fields.ObservedAtUnixMS != 1789139152648 {
+		t.Fatalf("unexpected traffic: %#v", event)
+	}
+
+	missing := mustEvent(t, `{"type":"traffic_state"}`).(TrafficState)
+	if missing.Fields.Key != nil || missing.Fields.RawValue != nil || missing.Fields.NormalizedValue != nil {
+		t.Fatalf("missing optional traffic fields should remain absent: %#v", missing.Fields)
 	}
 }
 
@@ -109,9 +128,42 @@ func TestStateVoiceLifecycleAndEnvironmentalUpdates(t *testing.T) {
 	}
 }
 
+func TestStateTrafficUpdatesAreIsolatedAndSnapshotIsIndependent(t *testing.T) {
+	state := NewState()
+	state.Apply(mustEvent(t, `{"type":"weather_state","time_unix_ms":10,"fields":{"key":"temperature","raw_value":16}}`))
+	state.Apply(mustEvent(t, `{"type":"river_state","time_unix_ms":11,"fields":{"key":"river_level","normalized_value":0.5}}`))
+	state.Apply(mustEvent(t, `{"type":"traffic_state","time_unix_ms":12,"fields":{"key":"e45_queue","label":"e45Queue","source":"trafikverket_traffic_flow","raw_value":53.1,"normalized_value":0,"observed_at_unix_ms":1789139152648}}`))
+
+	snapshot := state.Snapshot()
+	traffic, ok := snapshot.Traffic["e45_queue"]
+	if !ok || traffic.At != 12 || traffic.Fields.Label == nil || *traffic.Fields.Label != "e45Queue" || traffic.Fields.Source == nil || *traffic.Fields.Source != "trafikverket_traffic_flow" || traffic.Fields.RawValue == nil || *traffic.Fields.RawValue != 53.1 || traffic.Fields.NormalizedValue == nil || *traffic.Fields.NormalizedValue != 0 || traffic.Fields.ObservedAtUnixMS == nil || *traffic.Fields.ObservedAtUnixMS != 1789139152648 {
+		t.Fatalf("traffic state missing or incorrect: %#v", snapshot.Traffic)
+	}
+	if len(snapshot.Weather) != 1 || len(snapshot.River) != 1 || len(snapshot.Voices) != 0 || len(snapshot.Semantic) != 0 || len(snapshot.Phrase) != 0 || snapshot.LastArrival != nil {
+		t.Fatalf("traffic update changed unrelated state: %#v", snapshot)
+	}
+
+	*traffic.Fields.RawValue = 1
+	delete(snapshot.Traffic, "e45_queue")
+	authoritative := state.Snapshot().Traffic["e45_queue"]
+	if authoritative.Fields.RawValue == nil || *authoritative.Fields.RawValue != 53.1 {
+		t.Fatalf("snapshot mutation changed authoritative traffic state: %#v", authoritative)
+	}
+}
+
+func TestUnknownEventDoesNotMutateTrafficState(t *testing.T) {
+	state := NewState()
+	state.Apply(mustEvent(t, `{"type":"traffic_state","fields":{"key":"e45_queue","normalized_value":0.45}}`))
+	state.Apply(mustEvent(t, `{"type":"future_event","fields":{"key":"e45_queue","normalized_value":1}}`))
+	traffic := state.Snapshot().Traffic["e45_queue"]
+	if traffic.Fields.NormalizedValue == nil || *traffic.Fields.NormalizedValue != 0.45 {
+		t.Fatalf("unknown event mutated traffic state: %#v", traffic)
+	}
+}
+
 func TestMissingFieldsDoNotPanic(t *testing.T) {
 	state := NewState()
-	for _, packet := range []string{`{"type":"voice_start"}`, `{"type":"voice_end"}`, `{"type":"live_arrival"}`, `{"type":"weather_state"}`, `{"type":"river_state"}`, `{"type":"state_update"}`} {
+	for _, packet := range []string{`{"type":"voice_start"}`, `{"type":"voice_end"}`, `{"type":"live_arrival"}`, `{"type":"weather_state"}`, `{"type":"river_state"}`, `{"type":"traffic_state"}`, `{"type":"state_update"}`} {
 		state.Apply(mustEvent(t, packet))
 	}
 }

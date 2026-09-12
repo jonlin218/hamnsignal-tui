@@ -874,6 +874,673 @@ func TestLargeCanvasIncreasesVoiceEnvelopeWithoutChangingCause(t *testing.T) {
 	}
 }
 
+func TestMotorikIsAbsentWithoutPositiveTrafficPressure(t *testing.T) {
+	now := time.Unix(1000, 0)
+	for _, snapshot := range []hamnsignal.StateSnapshot{
+		{},
+		motorikSnapshot(0),
+	} {
+		presenter := NewPresenter()
+		presenter.Sync(snapshot, now)
+		field := newDensityField(80, 24)
+		presenter.contributeMotorik(&field, now)
+		if totalFieldEnergy(field) != 0 {
+			t.Fatalf("inactive motorik created field energy: %v", totalFieldEnergy(field))
+		}
+	}
+}
+
+func TestTrafficFixtureOverridesOnlyMotorikPressure(t *testing.T) {
+	now := time.Unix(1000, 0)
+	live := motorikSnapshot(.5)
+	presenter := NewPresenter()
+	presenter.Sync(live, now)
+	if presenter.motorikPressure != .5 {
+		t.Fatalf("live traffic pressure = %v", presenter.motorikPressure)
+	}
+	fixture := .2
+	presenter.SetFixture(VisualFixture{TrafficPressure: &fixture})
+	presenter.Sync(live, now)
+	if presenter.motorikPressure != .2 {
+		t.Fatalf("fixture pressure = %v", presenter.motorikPressure)
+	}
+	if value := *live.Traffic["e45_queue"].Fields.NormalizedValue; value != .5 {
+		t.Fatalf("fixture mutated live snapshot: %v", value)
+	}
+}
+
+func TestTrafficFixtureCanDisableOrEnableMotorik(t *testing.T) {
+	now := time.Unix(1000, 0)
+	zero := 0.0
+	disabled := NewPresenter()
+	disabled.SetFixture(VisualFixture{TrafficPressure: &zero})
+	disabled.Sync(motorikSnapshot(.5), now)
+	field := newDensityField(200, 60)
+	disabled.contributeMotorik(&field, now)
+	if totalFieldEnergy(field) != 0 {
+		t.Fatal("zero fixture did not disable live motorik")
+	}
+	positive := .8
+	enabled := NewPresenter()
+	enabled.SetFixture(VisualFixture{TrafficPressure: &positive})
+	enabled.Sync(motorikSnapshot(0), now)
+	field = newDensityField(200, 60)
+	enabled.contributeMotorik(&field, now)
+	if totalFieldEnergy(field) == 0 {
+		t.Fatal("positive fixture did not enable motorik over live zero")
+	}
+}
+
+func TestMotorikPressureClampsAndChangesSpatialPresenceNotTempo(t *testing.T) {
+	now := time.Unix(1000, 0)
+	negative := motorikField(-1, now, 200, 60)
+	if totalFieldEnergy(negative) != 0 {
+		t.Fatal("negative pressure activated motorik")
+	}
+	clamped := motorikField(2, now, 200, 60)
+	maximum := motorikField(1, now, 200, 60)
+	if !reflect.DeepEqual(clamped, maximum) {
+		t.Fatal("out-of-range positive pressure did not clamp to one")
+	}
+	low, high := motorikField(.2, now, 200, 60), motorikField(.8, now, 200, 60)
+	if motorikFragmentCount(.2) >= motorikFragmentCount(.8) || totalFieldEnergy(low) >= totalFieldEnergy(high) {
+		t.Fatal("pressure did not increase motorik spatial presence")
+	}
+	if motorikQuarterSeconds != 60/motorikBPM {
+		t.Fatal("motorik tempo is not fixed independently of pressure")
+	}
+	canvas := NewCanvas(200, 60)
+	low.rasterize(&canvas)
+	if strings.Trim(canvas.Render(), "⠀\n") == "" {
+		t.Fatal("positive motorik pressure did not survive Braille rasterization")
+	}
+}
+
+func TestMotorikTimingAndGeometryAreDeterministic(t *testing.T) {
+	now := time.Unix(1000, 0)
+	quarter := time.Duration(math.Round(motorikQuarterSeconds * float64(time.Second)))
+	if phase := motorikPhase(now); phase < 0 || phase >= 1 {
+		t.Fatalf("invalid phase: %v", phase)
+	}
+	if difference := math.Abs(motorikPhase(now.Add(quarter)) - motorikPhase(now)); difference > 0.000001 {
+		t.Fatalf("quarter note did not preserve phase: %v", difference)
+	}
+	first := motorikField(.5, now, 200, 60)
+	repeat := motorikField(.5, now, 200, 60)
+	later := motorikField(.5, now.Add(quarter/2), 200, 60)
+	if !reflect.DeepEqual(first, repeat) {
+		t.Fatal("fixed timestamp produced non-deterministic motorik geometry")
+	}
+	if reflect.DeepEqual(first, later) {
+		t.Fatal("different quarter-note phase did not move or reshape motorik")
+	}
+}
+
+func TestMotorikCoexistsWithExistingContributions(t *testing.T) {
+	now := time.Unix(1000, 0)
+	baseline := testVoiceSnapshot()
+	riverKey, precipitationKey := "river_level", "precipitation"
+	river, precipitation := hamnsignal.Number(.6), hamnsignal.Number(5)
+	baseline.River = map[string]hamnsignal.EnvironmentalValue{riverKey: {Fields: hamnsignal.EnvironmentalFields{NormalizedValue: &river}}}
+	baseline.Weather = map[string]hamnsignal.EnvironmentalValue{precipitationKey: {Fields: hamnsignal.EnvironmentalFields{RawValue: &precipitation}}}
+	mode := "tram"
+	baseline.LastArrival = &hamnsignal.Arrival{At: 1, Fields: hamnsignal.ArrivalFields{Mode: &mode}}
+	active := baseline
+	active.Traffic = motorikSnapshot(.5).Traffic
+
+	plain, motorik := NewPresenter(), NewPresenter()
+	plain.Sync(baseline, now)
+	motorik.Sync(active, now)
+	for name, contribute := range map[string]func(*Presenter, *densityField, time.Time){
+		"river":   func(p *Presenter, f *densityField, at time.Time) { p.contributeRiver(f, at) },
+		"rain":    func(p *Presenter, f *densityField, at time.Time) { p.contributeRain(f, at) },
+		"arrival": func(p *Presenter, f *densityField, at time.Time) { p.contributeArrival(f, at) },
+	} {
+		left, right := newDensityField(200, 60), newDensityField(200, 60)
+		contribute(plain, &left, now.Add(500*time.Millisecond))
+		contribute(motorik, &right, now.Add(500*time.Millisecond))
+		if !reflect.DeepEqual(left, right) {
+			t.Fatalf("motorik changed %s contribution", name)
+		}
+	}
+	for id, voice := range plain.voices {
+		left, right := newDensityField(200, 60), newDensityField(200, 60)
+		plain.contributeVoice(&left, voice, now)
+		motorik.contributeVoice(&right, motorik.voices[id], now)
+		if !reflect.DeepEqual(left, right) {
+			t.Fatal("motorik changed voice contribution")
+		}
+	}
+	motorikOnly := motorikField(.5, now, 200, 60)
+	if totalFieldEnergy(motorikOnly) == 0 {
+		t.Fatal("positive traffic did not create motorik alongside existing state")
+	}
+}
+
+func TestMotorikTinyViewportsRemainSafe(t *testing.T) {
+	now := time.Unix(1000, 0)
+	for _, size := range [][2]int{{1, 1}, {2, 1}, {40, 8}, {200, 60}} {
+		field := motorikField(.5, now, size[0], size[1])
+		canvas := NewCanvas(size[0], size[1])
+		field.rasterize(&canvas)
+		_ = NewPresenter().Render(motorikSnapshot(.5), size[0], size[1], now)
+	}
+}
+
+func TestMotorikDiagnostics(t *testing.T) {
+	now := time.Unix(1000, 0)
+	for _, pressure := range []float64{.2, .5, .8} {
+		field := motorikField(pressure, now, 200, 60)
+		top, bottom := fieldVerticalExtent(field, .022)
+		peak, nonZero := 0.0, 0
+		for _, value := range field.values {
+			if value > peak {
+				peak = value
+			}
+			if value > 0 {
+				nonZero++
+			}
+		}
+		typical := 0.0
+		if nonZero > 0 {
+			typical = totalFieldEnergy(field) / float64(nonZero)
+		}
+		t.Logf("pressure=%.2f fragments=%d horizontal=%d/%d vertical=%d rows peak=%.4f typical=%.5f", pressure, motorikFragmentCount(pressure), fieldWidthAbove(field, .022), field.width, bottom-top+1, peak, typical)
+	}
+}
+
+func TestMotorikGlyphsRequirePositiveCoherentMotorik(t *testing.T) {
+	now := time.Unix(0, 0)
+	for _, pressure := range []float64{0, .2} {
+		canvas, motorik, _ := motorikGlyphCanvas(pressure, now, 200, 60)
+		if pressure == 0 && glyphCount(canvas) != 0 {
+			t.Fatal("inactive motorik resolved a secondary glyph")
+		}
+		if pressure > 0 && totalFieldEnergy(motorik) == 0 {
+			t.Fatal("positive motorik fixture created no auxiliary field")
+		}
+	}
+
+	presenter := NewPresenter()
+	presenter.motorikPressure = 1
+	motorik := newDensityField(200, 60)
+	motorik.addGaussian(100, 120, 20, 3, .008, motorikColor)
+	shared := newDensityField(200, 60)
+	shared.add(motorik)
+	canvas := NewCanvas(200, 60)
+	shared.rasterize(&canvas)
+	presenter.resolveMotorikGlyphs(&canvas, motorik, shared, newDensityField(200, 60), now)
+	if glyphCount(canvas) != 0 {
+		t.Fatal("diffuse, weak motorik resolved a secondary glyph")
+	}
+}
+
+func TestMotorikGlyphSelectionIsDeterministicAndSparse(t *testing.T) {
+	now := time.Unix(0, 0)
+	first, motorik, _ := motorikGlyphCanvas(1, now, 200, 60)
+	repeat, _, _ := motorikGlyphCanvas(1, now, 200, 60)
+	if !reflect.DeepEqual(first.glyphs, repeat.glyphs) {
+		t.Fatal("same motorik state, time, and viewport selected different glyphs")
+	}
+	count := glyphCount(first)
+	if count == 0 {
+		t.Fatal("coherent motorik did not resolve any secondary glyphs")
+	}
+	if count > motorikVisibleCells(motorik, first)*12/100 {
+		t.Fatalf("secondary glyphs were not sparse: %d glyphs", count)
+	}
+	leading, trailing := 0, 0
+	for _, glyph := range first.glyphs {
+		switch glyph {
+		case motorikGlyphLeading:
+			leading++
+		case motorikGlyphTrailing:
+			trailing++
+		case 0:
+		default:
+			t.Fatalf("unexpected motorik glyph %q", glyph)
+		}
+	}
+	if leading == 0 || trailing == 0 {
+		t.Fatalf("coherent motorik did not produce both directional half-strokes: leading=%d trailing=%d", leading, trailing)
+	}
+	rendered := first.Render()
+	if !strings.Contains(rendered, string(motorikGlyphLeading)) || !strings.Contains(rendered, string(motorikGlyphTrailing)) {
+		t.Fatal("selected glyphs did not reach terminal rendering")
+	}
+	for _, row := range strings.Split(rendered, "\n") {
+		if len([]rune(row)) != first.Width {
+			t.Fatalf("glyph rendering changed terminal cell width: got %d want %d", len([]rune(row)), first.Width)
+		}
+	}
+}
+
+func TestMotorikGlyphPressureAndPhaseOnlyAffectArticulation(t *testing.T) {
+	now := time.Unix(0, 0)
+	low, lowMotorik, _ := motorikGlyphCanvas(.2, now, 200, 60)
+	high, highMotorik, _ := motorikGlyphCanvas(1, now, 200, 60)
+	if glyphCount(high) < glyphCount(low) {
+		t.Fatalf("higher pressure reduced articulation: low=%d high=%d", glyphCount(low), glyphCount(high))
+	}
+	if glyphCount(high) >= motorikVisibleCells(highMotorik, high) {
+		t.Fatal("secondary glyphs replaced all visible motorik material")
+	}
+	quarter := time.Duration(math.Round(motorikQuarterSeconds * float64(time.Second)))
+	later, _, _ := motorikGlyphCanvas(1, now.Add(quarter/2), 200, 60)
+	if reflect.DeepEqual(high.glyphs, later.glyphs) {
+		t.Fatal("different propulsion phase did not change local glyph articulation")
+	}
+	if motorikQuarterSeconds != 60/motorikBPM || totalFieldEnergy(lowMotorik) == 0 {
+		t.Fatal("glyph articulation altered the existing fixed motorik timing model")
+	}
+}
+
+func TestMotorikGlyphsYieldToSharedFieldAndPreserveResolvedColour(t *testing.T) {
+	now := time.Unix(0, 0)
+	presenter := NewPresenter()
+	presenter.Sync(motorikSnapshot(1), now)
+	motorik := newDensityField(200, 60)
+	presenter.contributeMotorik(&motorik, now)
+	shared := newDensityField(200, 60)
+	shared.add(motorik)
+	canvas := NewCanvas(200, 60)
+	shared.rasterize(&canvas)
+	before := cloneCanvas(canvas)
+	presenter.resolveMotorikGlyphs(&canvas, motorik, shared, newDensityField(200, 60), now)
+	index := firstGlyphIndex(canvas)
+	if index < 0 {
+		t.Fatal("test requires an eligible motorik glyph")
+	}
+	if canvas.colors[index] != before.colors[index] || canvas.tones[index] != before.tones[index] {
+		t.Fatal("glyph override changed the existing resolved colour or tone")
+	}
+
+	withOverlap := shared
+	withOverlap.addGaussian(float64(withOverlap.width)/2, float64(withOverlap.height)*.60, float64(withOverlap.width)*.60, float64(withOverlap.height)*.30, .30, fieldColor{210, 120, 160})
+	overlapCanvas := NewCanvas(200, 60)
+	withOverlap.rasterize(&overlapCanvas)
+	presenter.resolveMotorikGlyphs(&overlapCanvas, motorik, withOverlap, newDensityField(200, 60), now)
+	if glyphCount(overlapCanvas) >= glyphCount(canvas) {
+		t.Fatalf("strong non-motorik overlap did not suppress articulation: before=%d after=%d", glyphCount(canvas), glyphCount(overlapCanvas))
+	}
+
+	beforeMotorik, beforeShared := cloneDensityField(motorik), cloneDensityField(shared)
+	presenter.resolveMotorikGlyphs(&canvas, motorik, shared, newDensityField(200, 60), now)
+	if !reflect.DeepEqual(motorik, beforeMotorik) || !reflect.DeepEqual(shared, beforeShared) {
+		t.Fatal("glyph resolver mutated a density field")
+	}
+}
+
+func TestMotorikGlyphDiagnostics(t *testing.T) {
+	now := time.Unix(0, 0)
+	for _, pressure := range []float64{.2, .5, .8, 1} {
+		canvas, motorik, _ := motorikGlyphCanvas(pressure, now, 200, 60)
+		visible, glyphs := motorikBrailleVisibleCells(canvas, motorik), glyphCount(canvas)
+		t.Logf("pressure=%.2f motorik/Braille-visible=%d secondary=%d (%.1f%%)", pressure, visible, glyphs, percent(glyphs, visible))
+		if glyphs >= visible && visible > 0 {
+			t.Fatal("Braille did not remain dominant")
+		}
+	}
+}
+
+func TestMotorikGlyphResolverLeavesOrdinaryRasterizationAndTinyCanvasesSafe(t *testing.T) {
+	now := time.Unix(0, 0)
+	presenter := NewPresenter()
+	blankMotorik, shared := newDensityField(80, 24), newDensityField(80, 24)
+	shared.addGaussian(40, 48, 12, 8, .08, fieldColor{100, 180, 220})
+	canvas := NewCanvas(80, 24)
+	shared.rasterize(&canvas)
+	before := canvas
+	presenter.resolveMotorikGlyphs(&canvas, blankMotorik, shared, newDensityField(80, 24), now)
+	if !reflect.DeepEqual(canvas, before) {
+		t.Fatal("ordinary rasterization changed without eligible motorik")
+	}
+
+	t.Setenv("NO_COLOR", "1")
+	for _, size := range [][2]int{{1, 1}, {2, 1}, {5, 2}, {40, 8}} {
+		canvas, _, _ := motorikGlyphCanvas(1, now, size[0], size[1])
+		if strings.Contains(canvas.RenderANSI(), "\x1b[") {
+			t.Fatal("NO_COLOR rendering emitted ANSI escape codes")
+		}
+	}
+}
+
+func TestMotorikRiverResistanceIsSmoothAndRiverSpecific(t *testing.T) {
+	if motorikRiverResistance(0) != 1 || motorikRiverResistance(.018) != 1 {
+		t.Fatal("river-free motorik was attenuated")
+	}
+	weak := motorikRiverResistance(.030)
+	moderate := motorikRiverResistance(.052)
+	strong := motorikRiverResistance(.085)
+	if !(weak < 1 && weak > moderate && moderate > strong && strong == .12) {
+		t.Fatalf("unexpected river resistance: weak=%v moderate=%v strong=%v", weak, moderate, strong)
+	}
+	if motorikRiverGlyphFactor(.012) != 1 || motorikRiverGlyphFactor(.065) != 0 {
+		t.Fatal("glyph river transition endpoints changed")
+	}
+
+	now := time.Unix(0, 0)
+	_, raw, effective, river, _ := motorikRiverFrame(1, 0, false, now, 200, 60)
+	if totalFieldEnergy(river) != 0 || !reflect.DeepEqual(raw, effective) {
+		t.Fatal("no river changed motorik output")
+	}
+	voiceOnly := newDensityField(200, 60)
+	voiceOnly.addGaussian(100, 125, 90, 30, .8, fieldColor{190, 130, 193})
+	withVoice := cloneDensityField(raw)
+	attenuateMotorikByRiver(&withVoice, newDensityField(200, 60))
+	if !reflect.DeepEqual(raw, withVoice) || totalFieldEnergy(voiceOnly) == 0 {
+		t.Fatal("non-river material affected motorik resistance")
+	}
+}
+
+func TestMotorikRiverResistanceSuppressesDeepMotorikButKeepsBoundary(t *testing.T) {
+	now := time.Unix(0, 0)
+	presenter, raw, _, _, _ := motorikRiverFrame(1, 0, false, now, 200, 60)
+	// A deliberately broad river-density sample crosses the existing current to
+	// exercise both its boundary and body resistance without changing motorik
+	// geometry.
+	river := newDensityField(200, 60)
+	river.addGaussian(200, 144, 400, 16, .11, riverColor)
+	effective := cloneDensityField(raw)
+	attenuateMotorikByRiver(&effective, river)
+	shared := cloneDensityField(river)
+	shared.add(effective)
+	canvas := NewCanvas(200, 60)
+	shared.rasterize(&canvas)
+	presenter.resolveMotorikGlyphs(&canvas, effective, shared, river, now)
+	outsideRaw, outsideEffective := motorikEnergyByRiver(raw, river, 0, .018), motorikEnergyByRiver(effective, river, 0, .018)
+	boundaryRaw, boundaryEffective := motorikEnergyByRiver(raw, river, .018, .055), motorikEnergyByRiver(effective, river, .018, .055)
+	strongRaw, strongEffective := motorikEnergyByRiver(raw, river, .055, math.Inf(1)), motorikEnergyByRiver(effective, river, .055, math.Inf(1))
+	if outsideRaw == 0 || math.Abs(outsideRaw-outsideEffective) > 1e-9 {
+		t.Fatalf("motorik changed outside river: raw=%v effective=%v", outsideRaw, outsideEffective)
+	}
+	if !(boundaryRaw > 0 && boundaryEffective > 0 && boundaryEffective < boundaryRaw && strongRaw > 0 && strongEffective < strongRaw*.45) {
+		t.Fatalf("river transition was not gradual/deeply resistant: boundary=%v/%v strong=%v/%v", boundaryEffective, boundaryRaw, strongEffective, strongRaw)
+	}
+	if glyphCountInRiver(canvas, river, .055) != 0 {
+		t.Fatal("strong river retained mechanical glyph articulation")
+	}
+	if glyphCount(canvas) == 0 {
+		t.Fatal("river removed all current articulation, including outside its body")
+	}
+}
+
+func TestMotorikRiverProtectionFollowsRiverLevelAndSurvivesHighPressure(t *testing.T) {
+	now := time.Unix(0, 0)
+	_, _, lowEffective, lowRiver, _ := motorikRiverFrame(1, .1, true, now, 200, 60)
+	_, _, highEffective, highRiver, highCanvas := motorikRiverFrame(1, .9, true, now, 200, 60)
+	lowTop, _ := fieldVerticalExtent(lowRiver, .055)
+	highTop, _ := fieldVerticalExtent(highRiver, .055)
+	if highTop >= lowTop {
+		t.Fatalf("strong-river protection did not rise with river level: low=%d high=%d", lowTop, highTop)
+	}
+	if totalFieldEnergy(highEffective) >= totalFieldEnergy(lowEffective) {
+		t.Fatal("higher observed river did not create a larger protected region")
+	}
+	if glyphCountInRiver(highCanvas, highRiver, .055) != 0 {
+		t.Fatal("pressure 1 overpowered strong river glyph protection")
+	}
+	t.Setenv("NO_COLOR", "1")
+	for _, size := range [][2]int{{1, 1}, {2, 1}, {40, 8}} {
+		_, _, _, _, canvas := motorikRiverFrame(1, .9, true, now, size[0], size[1])
+		if strings.Contains(canvas.RenderANSI(), "\x1b[") {
+			t.Fatal("NO_COLOR rendering emitted ANSI escape codes")
+		}
+	}
+}
+
+func TestMotorikRiverDiagnostics(t *testing.T) {
+	now := time.Unix(0, 0)
+	for _, pressure := range []float64{.2, .5, .8, 1} {
+		_, raw, effective, river, canvas := motorikRiverFrame(pressure, .9, true, now, 200, 60)
+		outside := motorikEnergyByRiver(effective, river, 0, .018)
+		boundary := motorikEnergyByRiver(effective, river, .018, .055)
+		strong := motorikEnergyByRiver(effective, river, .055, math.Inf(1))
+		glyphsOutside := glyphCountInRiverRange(canvas, river, 0, .018)
+		glyphsStrong := glyphCountInRiver(canvas, river, .055)
+		t.Logf("pressure=%.2f raw=%.3f outside=%.3f boundary=%.3f strong=%.3f glyphs outside=%d strong=%d", pressure, totalFieldEnergy(raw), outside, boundary, strong, glyphsOutside, glyphsStrong)
+	}
+}
+
+func TestRainFixtureOverridesOnlyEffectivePrecipitation(t *testing.T) {
+	now := time.Unix(400, 0)
+	live := rainSnapshot(5)
+	ordinary := NewPresenter()
+	ordinary.Sync(live, now)
+	liveField := newDensityField(200, 60)
+	ordinary.contributeRain(&liveField, now)
+	if totalFieldEnergy(liveField) == 0 || ordinary.precipitation != 5 {
+		t.Fatal("live precipitation did not reach existing rain renderer")
+	}
+
+	zero := 0.0
+	dry := NewPresenter()
+	dry.SetFixture(VisualFixture{Precipitation: &zero})
+	dry.Sync(live, now)
+	dryField := newDensityField(200, 60)
+	dry.contributeRain(&dryField, now)
+	if dry.precipitation != 0 || totalFieldEnergy(dryField) != 0 {
+		t.Fatal("explicit zero rain fixture did not suppress only VISUAL rain")
+	}
+	if value := *live.Weather["precipitation"].Fields.RawValue; value != 5 {
+		t.Fatalf("rain fixture mutated live snapshot: %v", value)
+	}
+
+	fixtureValue := .8
+	fixture := NewPresenter()
+	fixture.SetFixture(VisualFixture{Precipitation: &fixtureValue})
+	fixture.Sync(rainSnapshot(0), now)
+	fixtureField := newDensityField(200, 60)
+	fixture.contributeRain(&fixtureField, now)
+	matchingLive := NewPresenter()
+	matchingLive.Sync(rainSnapshot(.8), now)
+	matchingField := newDensityField(200, 60)
+	matchingLive.contributeRain(&matchingField, now)
+	if fixture.precipitation != .8 || !reflect.DeepEqual(fixtureField, matchingField) {
+		t.Fatal("rain fixture did not faithfully use existing effective precipitation path")
+	}
+}
+
+func TestRainFixtureRetainsWindAndDeterminism(t *testing.T) {
+	now := time.Unix(400, 0)
+	fixtureValue := .8
+	state := rainSnapshot(0)
+	directionKey, speedKey := "wind_direction", "wind_speed"
+	direction, speed := hamnsignal.Number(90), hamnsignal.Number(10)
+	state.Weather[directionKey] = hamnsignal.EnvironmentalValue{Fields: hamnsignal.EnvironmentalFields{Key: &directionKey, RawValue: &direction}}
+	state.Weather[speedKey] = hamnsignal.EnvironmentalValue{Fields: hamnsignal.EnvironmentalFields{Key: &speedKey, RawValue: &speed}}
+	first, repeat := NewPresenter(), NewPresenter()
+	first.SetFixture(VisualFixture{Precipitation: &fixtureValue})
+	repeat.SetFixture(VisualFixture{Precipitation: &fixtureValue})
+	first.Sync(state, now)
+	repeat.Sync(state, now)
+	left, right := newDensityField(200, 60), newDensityField(200, 60)
+	first.contributeRain(&left, now)
+	repeat.contributeRain(&right, now)
+	if first.currentWindBias == 0 || !reflect.DeepEqual(left, right) {
+		t.Fatal("rain fixture changed live wind deflection or deterministic traces")
+	}
+	for _, size := range [][2]int{{1, 1}, {2, 1}, {40, 8}} {
+		_ = first.Render(state, size[0], size[1], now)
+	}
+}
+
+func TestRainFixtureDiagnostics(t *testing.T) {
+	now := time.Unix(400, 0)
+	for _, precipitation := range []float64{0, .2, .5, .8, 1} {
+		presenter := NewPresenter()
+		presenter.SetFixture(VisualFixture{Precipitation: &precipitation})
+		presenter.Sync(rainSnapshot(0), now)
+		field := newDensityField(200, 60)
+		presenter.contributeRain(&field, now)
+		traces := rainTraceCount(precipitation)
+		occupied := 0
+		for _, value := range field.values {
+			if value > 0 {
+				occupied++
+			}
+		}
+		t.Logf("fixture=%.2f effective=%.2f traces=%d nonzero=%d", precipitation, presenter.precipitation, traces, occupied)
+	}
+}
+
+func TestRainBasePlacementBroadensWithoutChangingCountOrWind(t *testing.T) {
+	const terminalWidth, terminalHeight, count = 200, 60, 8
+	const width, height = terminalWidth * 2, terminalHeight * 4
+	oldMin, oldMax, newMin, newMax := 1.0, 0.0, 1.0, 0.0
+	for index := 0; index < count; index++ {
+		seed := stableSeed(int64(index+1)*7919 + int64(width*31+height))
+		old := float64(stableByte(seed, 1)) / 255
+		current := rainBasePosition(seed, index, count)
+		oldMin, oldMax = math.Min(oldMin, old), math.Max(oldMax, old)
+		newMin, newMax = math.Min(newMin, current), math.Max(newMax, current)
+		if current < .02 || current > .98 {
+			t.Fatalf("rain base escaped natural margin: %.3f", current)
+		}
+		age, wind := .37, .04
+		if got, want := (current+wind*age*1.2)-current, wind*age*1.2; math.Abs(got-want) > 1e-12 {
+			t.Fatalf("wind displacement changed: got=%v want=%v", got, want)
+		}
+	}
+	if newMax-newMin <= oldMax-oldMin {
+		t.Fatalf("rain base span did not broaden: old=%.3f new=%.3f", oldMax-oldMin, newMax-newMin)
+	}
+	for precipitation, want := range map[float64]int{0: 0, .2: 1, .5: 1, .8: 2, 1: 2, 5: 8, 10: 8} {
+		if got := rainTraceCount(precipitation); got != want {
+			t.Fatalf("trace count changed at %.2f: got=%d want=%d", precipitation, got, want)
+		}
+	}
+	if rainTraceCount(100) != 8 {
+		t.Fatal("rain trace maximum changed")
+	}
+	t.Logf("200x60 count=8 base span: old %.0f..%.0f (%.0f), new %.0f..%.0f (%.0f) virtual dots", oldMin*width, oldMax*width, (oldMax-oldMin)*width, newMin*width, newMax*width, (newMax-newMin)*width)
+}
+
+func motorikGlyphCanvas(pressure float64, now time.Time, width, height int) (Canvas, densityField, densityField) {
+	presenter := NewPresenter()
+	presenter.Sync(motorikSnapshot(pressure), now)
+	motorik := newDensityField(width, height)
+	presenter.contributeMotorik(&motorik, now)
+	shared := newDensityField(width, height)
+	shared.add(motorik)
+	canvas := NewCanvas(width, height)
+	shared.rasterize(&canvas)
+	presenter.resolveMotorikGlyphs(&canvas, motorik, shared, newDensityField(width, height), now)
+	return canvas, motorik, shared
+}
+
+func rainSnapshot(precipitation float64) hamnsignal.StateSnapshot {
+	key := "precipitation"
+	raw := hamnsignal.Number(precipitation)
+	return hamnsignal.StateSnapshot{Weather: map[string]hamnsignal.EnvironmentalValue{
+		key: {Fields: hamnsignal.EnvironmentalFields{Key: &key, RawValue: &raw}},
+	}}
+}
+
+func motorikRiverFrame(pressure, level float64, hasRiver bool, now time.Time, width, height int) (*Presenter, densityField, densityField, densityField, Canvas) {
+	presenter := NewPresenter()
+	snapshot := motorikSnapshot(pressure)
+	if hasRiver {
+		key := "river_level"
+		normalized := hamnsignal.Number(level)
+		snapshot.River = map[string]hamnsignal.EnvironmentalValue{key: {Fields: hamnsignal.EnvironmentalFields{Key: &key, NormalizedValue: &normalized}}}
+	}
+	presenter.Sync(snapshot, now)
+	river := newDensityField(width, height)
+	presenter.contributeRiver(&river, now)
+	raw := newDensityField(width, height)
+	presenter.contributeMotorik(&raw, now)
+	effective := cloneDensityField(raw)
+	attenuateMotorikByRiver(&effective, river)
+	shared := cloneDensityField(river)
+	shared.add(effective)
+	canvas := NewCanvas(width, height)
+	shared.rasterize(&canvas)
+	presenter.resolveMotorikGlyphs(&canvas, effective, shared, river, now)
+	return presenter, raw, effective, river, canvas
+}
+
+func motorikEnergyByRiver(motorik, river densityField, low, high float64) float64 {
+	total := 0.0
+	for index, value := range motorik.values {
+		if river.values[index] >= low && river.values[index] < high {
+			total += value
+		}
+	}
+	return total
+}
+
+func glyphCountInRiver(canvas Canvas, river densityField, minimum float64) int {
+	return glyphCountInRiverRange(canvas, river, minimum, math.Inf(1))
+}
+
+func glyphCountInRiverRange(canvas Canvas, river densityField, low, high float64) int {
+	count := 0
+	for y := 0; y < canvas.Height; y++ {
+		for x := 0; x < canvas.Width; x++ {
+			if canvas.glyphs[y*canvas.Width+x] != 0 {
+				density := motorikCellDensity(river, x, y)
+				if density >= low && density < high {
+					count++
+				}
+			}
+		}
+	}
+	return count
+}
+
+func glyphCount(canvas Canvas) int {
+	count := 0
+	for _, glyph := range canvas.glyphs {
+		if glyph != 0 {
+			count++
+		}
+	}
+	return count
+}
+
+func firstGlyphIndex(canvas Canvas) int {
+	for index, glyph := range canvas.glyphs {
+		if glyph != 0 {
+			return index
+		}
+	}
+	return -1
+}
+
+func motorikVisibleCells(field densityField, canvas Canvas) int {
+	count := 0
+	for y := 0; y < canvas.Height; y++ {
+		for x := 0; x < canvas.Width; x++ {
+			if motorikCellDensity(field, x, y) >= .009 {
+				count++
+			}
+		}
+	}
+	return count
+}
+
+func motorikBrailleVisibleCells(canvas Canvas, field densityField) int {
+	count := 0
+	for y := 0; y < canvas.Height; y++ {
+		for x := 0; x < canvas.Width; x++ {
+			if canvas.dots[y*canvas.Width+x] != 0 && motorikCellDensity(field, x, y) >= .009 {
+				count++
+			}
+		}
+	}
+	return count
+}
+
+func cloneCanvas(canvas Canvas) Canvas {
+	copy := canvas
+	copy.dots = append([]uint8(nil), canvas.dots...)
+	copy.tones = append([]uint8(nil), canvas.tones...)
+	copy.colors = append([]fieldColor(nil), canvas.colors...)
+	copy.glyphs = append([]rune(nil), canvas.glyphs...)
+	return copy
+}
+
 func nonBlankWidth(rendered string) int {
 	min, max := 1<<30, -1
 	for _, line := range strings.Split(rendered, "\n") {
@@ -892,6 +1559,22 @@ func nonBlankWidth(rendered string) int {
 		return 0
 	}
 	return max - min + 1
+}
+
+func motorikSnapshot(pressure float64) hamnsignal.StateSnapshot {
+	key := "e45_queue"
+	normalized := hamnsignal.Number(pressure)
+	return hamnsignal.StateSnapshot{Traffic: map[string]hamnsignal.EnvironmentalValue{
+		key: {Fields: hamnsignal.EnvironmentalFields{Key: &key, NormalizedValue: &normalized}},
+	}}
+}
+
+func motorikField(pressure float64, now time.Time, width, height int) densityField {
+	presenter := NewPresenter()
+	presenter.Sync(motorikSnapshot(pressure), now)
+	field := newDensityField(width, height)
+	presenter.contributeMotorik(&field, now)
+	return field
 }
 
 func numberPtr(value hamnsignal.Number) *hamnsignal.Number { return &value }

@@ -14,6 +14,7 @@ type Canvas struct {
 	dots   []uint8
 	tones  []uint8
 	colors []fieldColor
+	glyphs []rune
 }
 
 func NewCanvas(width, height int) Canvas {
@@ -23,7 +24,17 @@ func NewCanvas(width, height int) Canvas {
 	if height < 0 {
 		height = 0
 	}
-	return Canvas{Width: width, Height: height, dots: make([]uint8, width*height), tones: make([]uint8, width*height), colors: make([]fieldColor, width*height)}
+	return Canvas{Width: width, Height: height, dots: make([]uint8, width*height), tones: make([]uint8, width*height), colors: make([]fieldColor, width*height), glyphs: make([]rune, width*height)}
+}
+
+// setGlyphOverride replaces a fully rasterized cell's rune while retaining the
+// existing resolved foreground colour and tone. It is used only by motorik's
+// experimental articulation pass.
+func (c *Canvas) setGlyphOverride(x, y int, glyph rune) {
+	if c == nil || x < 0 || y < 0 || x >= c.Width || y >= c.Height {
+		return
+	}
+	c.glyphs[y*c.Width+x] = glyph
 }
 
 func (c *Canvas) Set(x, y int) {
@@ -81,6 +92,9 @@ func (c Canvas) render(colour bool) string {
 		for x := 0; x < c.Width; x++ {
 			index := y*c.Width + x
 			cell := rune(0x2800 + int(c.dots[index]))
+			if c.glyphs[index] != 0 {
+				cell = c.glyphs[index]
+			}
 			if colour && c.dots[index] != 0 {
 				colour := c.colors[index]
 				r, g, b := int(colour.r), int(colour.g), int(colour.b)

@@ -76,11 +76,11 @@ func (m Model) View() string {
 	var body string
 	if contentWidth >= 72 {
 		columnWidth := (contentWidth - 3) / 2
-		left := strings.Join([]string{riverSection(snapshot, columnWidth), weatherSection(snapshot, columnWidth), arrivalSection(snapshot, columnWidth)}, "\n\n")
+		left := strings.Join([]string{riverSection(snapshot, columnWidth), weatherSection(snapshot, columnWidth), trafficSection(snapshot, columnWidth), arrivalSection(snapshot, columnWidth)}, "\n\n")
 		right := strings.Join([]string{musicalSection(snapshot, columnWidth), voiceSection(snapshot, columnWidth, m.height)}, "\n\n")
 		body = lipgloss.JoinHorizontal(lipgloss.Top, lipgloss.NewStyle().Width(columnWidth).Render(left), "   ", lipgloss.NewStyle().Width(columnWidth).Render(right))
 	} else {
-		sections := []string{riverSection(snapshot, contentWidth), weatherSection(snapshot, contentWidth), musicalSection(snapshot, contentWidth), voiceSection(snapshot, contentWidth, m.height)}
+		sections := []string{riverSection(snapshot, contentWidth), weatherSection(snapshot, contentWidth), trafficSection(snapshot, contentWidth), musicalSection(snapshot, contentWidth), voiceSection(snapshot, contentWidth, m.height)}
 		if m.height >= 24 {
 			sections = append(sections, arrivalSection(snapshot, contentWidth))
 		}
@@ -183,6 +183,21 @@ func weatherSection(state hamnsignal.StateSnapshot, width int) string {
 		lines = append(lines, fmt.Sprintf("%-17s%s", item.label, number(*value.Fields.RawValue, 2)+item.suffix))
 	}
 	return section("WEATHER", lines, width)
+}
+
+func trafficSection(state hamnsignal.StateSnapshot, width int) string {
+	value, ok := state.Traffic["e45_queue"]
+	if !ok {
+		return section("TRAFFIC", nil, width)
+	}
+	lines := []string{"E45 / OSCARSLEDEN"}
+	if value.Fields.RawValue != nil {
+		lines = append(lines, number(*value.Fields.RawValue, 1)+" km/h")
+	}
+	if value.Fields.NormalizedValue != nil {
+		lines = append(lines, "PRESSURE  "+number(*value.Fields.NormalizedValue, 2))
+	}
+	return section("TRAFFIC", lines, width)
 }
 
 func musicalSection(state hamnsignal.StateSnapshot, width int) string {

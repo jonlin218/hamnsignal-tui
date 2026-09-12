@@ -11,6 +11,7 @@ type State struct {
 	Phrase      map[string]any
 	Weather     map[string]EnvironmentalValue
 	River       map[string]EnvironmentalValue
+	Traffic     map[string]EnvironmentalValue
 	LastArrival *Arrival
 }
 
@@ -21,6 +22,7 @@ type StateSnapshot struct {
 	Phrase      map[string]any
 	Weather     map[string]EnvironmentalValue
 	River       map[string]EnvironmentalValue
+	Traffic     map[string]EnvironmentalValue
 	LastArrival *Arrival
 }
 
@@ -44,7 +46,7 @@ type EnvironmentalValue struct {
 func NewState() *State {
 	return &State{
 		Voices: map[int64]Voice{}, Semantic: map[string]any{}, Phrase: map[string]any{},
-		Weather: map[string]EnvironmentalValue{}, River: map[string]EnvironmentalValue{},
+		Weather: map[string]EnvironmentalValue{}, River: map[string]EnvironmentalValue{}, Traffic: map[string]EnvironmentalValue{},
 	}
 }
 
@@ -59,7 +61,7 @@ func (s *State) SetConnected(connected bool) {
 func (s *State) Snapshot() StateSnapshot {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	snapshot := StateSnapshot{Connected: s.Connected, Voices: map[int64]Voice{}, Semantic: map[string]any{}, Phrase: map[string]any{}, Weather: map[string]EnvironmentalValue{}, River: map[string]EnvironmentalValue{}}
+	snapshot := StateSnapshot{Connected: s.Connected, Voices: map[int64]Voice{}, Semantic: map[string]any{}, Phrase: map[string]any{}, Weather: map[string]EnvironmentalValue{}, River: map[string]EnvironmentalValue{}, Traffic: map[string]EnvironmentalValue{}}
 	for key, value := range s.Voices {
 		snapshot.Voices[key] = value
 	}
@@ -74,6 +76,9 @@ func (s *State) Snapshot() StateSnapshot {
 	}
 	for key, value := range s.River {
 		snapshot.River[key] = value
+	}
+	for key, value := range s.Traffic {
+		snapshot.Traffic[key] = cloneEnvironmentalValue(value)
 	}
 	if s.LastArrival != nil {
 		arrival := *s.LastArrival
@@ -120,6 +125,10 @@ func (s *State) Apply(event Event) {
 		if e.Fields.Key != nil {
 			s.River[*e.Fields.Key] = EnvironmentalValue{Fields: e.Fields, At: e.TimeUnixMS}
 		}
+	case TrafficState:
+		if e.Fields.Key != nil {
+			s.Traffic[*e.Fields.Key] = EnvironmentalValue{Fields: e.Fields, At: e.TimeUnixMS}
+		}
 	}
 }
 
@@ -139,4 +148,36 @@ func (s *State) ensureMaps() {
 	if s.River == nil {
 		s.River = map[string]EnvironmentalValue{}
 	}
+	if s.Traffic == nil {
+		s.Traffic = map[string]EnvironmentalValue{}
+	}
+}
+
+func cloneEnvironmentalValue(value EnvironmentalValue) EnvironmentalValue {
+	fields := value.Fields
+	if fields.Key != nil {
+		key := *fields.Key
+		fields.Key = &key
+	}
+	if fields.Source != nil {
+		source := *fields.Source
+		fields.Source = &source
+	}
+	if fields.Label != nil {
+		label := *fields.Label
+		fields.Label = &label
+	}
+	if fields.RawValue != nil {
+		raw := *fields.RawValue
+		fields.RawValue = &raw
+	}
+	if fields.NormalizedValue != nil {
+		normalized := *fields.NormalizedValue
+		fields.NormalizedValue = &normalized
+	}
+	if fields.ObservedAtUnixMS != nil {
+		observedAt := *fields.ObservedAtUnixMS
+		fields.ObservedAtUnixMS = &observedAt
+	}
+	return EnvironmentalValue{Fields: fields, At: value.At}
 }
