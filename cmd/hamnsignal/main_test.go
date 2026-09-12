@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"strconv"
+	"testing"
+)
 
 func TestParseVisualTraffic(t *testing.T) {
 	for _, value := range []string{"0", "0.20", "1"} {
@@ -27,6 +30,36 @@ func TestParseVisualRain(t *testing.T) {
 		if _, err := parseVisualRain(value); err == nil {
 			t.Fatalf("invalid rain fixture %q succeeded", value)
 		}
+	}
+}
+
+func TestParseVisualRadiation(t *testing.T) {
+	for _, value := range []string{"0", ".15", ".50", ".85", ".999", "1", "1.0"} {
+		radiation, err := parseVisualRadiation(value)
+		if err != nil || radiation == nil {
+			t.Fatalf("valid radiation fixture %q failed: %v", value, err)
+		}
+	}
+	for _, value := range []string{"radiation", "NaN", "Inf", "-0.01", "1.01"} {
+		if _, err := parseVisualRadiation(value); err == nil {
+			t.Fatalf("invalid radiation fixture %q succeeded", value)
+		}
+	}
+}
+
+func TestParseOptionsPreservesExactRadiationFixtureBounds(t *testing.T) {
+	for _, value := range []string{"0", ".999", "1", "1.0"} {
+		options, err := parseOptions([]string{"--visual-radiation=" + value})
+		if err != nil || options.fixture.Radiation == nil {
+			t.Fatalf("radiation fixture %q was not preserved: options=%#v err=%v", value, options, err)
+		}
+		want, _ := strconv.ParseFloat(value, 64)
+		if got := *options.fixture.Radiation; got != want {
+			t.Fatalf("radiation fixture %q changed in options: got=%v want=%v", value, got, want)
+		}
+	}
+	if _, err := parseOptions([]string{"--visual-radiation=1.000001"}); err == nil {
+		t.Fatal("out-of-range radiation fixture was accepted")
 	}
 }
 

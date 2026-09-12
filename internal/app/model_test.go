@@ -70,16 +70,26 @@ func TestRainFixtureLeavesLiveDataTruthfulAndComposes(t *testing.T) {
 	state := hamnsignal.NewState()
 	key, liveRain := "precipitation", hamnsignal.Number(0)
 	state.Weather[key] = hamnsignal.EnvironmentalValue{Fields: hamnsignal.EnvironmentalFields{Key: &key, RawValue: &liveRain}}
-	rain, traffic := .8, .5
-	model := NewModel(state, "disabled", visual.VisualFixture{TrafficPressure: &traffic, Precipitation: &rain, MotorikClick: true})
+	rain, traffic, radiation := .8, .5, .85
+	model := NewModel(state, "disabled", visual.VisualFixture{TrafficPressure: &traffic, Precipitation: &rain, Radiation: &radiation, MotorikClick: true})
 	updated, _ := model.Update(tea.WindowSizeMsg{Width: 160, Height: 35})
 	model = updated.(Model)
 	output := model.View()
-	if !strings.Contains(output, "precipitation    0.00 mm") || !strings.Contains(output, "TRAFFIC 0.50 — RAIN 0.80 — MOTORIK CLICK") {
+	if !strings.Contains(output, "precipitation    0.00 mm") || !strings.Contains(output, "TRAFFIC 0.50 — RAIN 0.80 — RADIATION 0.85 — MOTORIK CLICK") {
 		t.Fatalf("rain fixture obscured live DATA or indication: %s", output)
 	}
 	if value := *state.Snapshot().Weather[key].Fields.RawValue; value != 0 {
 		t.Fatalf("rain fixture mutated central weather state: %v", value)
+	}
+}
+
+func TestRadiationFixtureExactUpperBoundIsIndicated(t *testing.T) {
+	state := hamnsignal.NewState()
+	for _, radiation := range []float64{1, 1.0} {
+		model := NewModel(state, "disabled", visual.VisualFixture{Radiation: &radiation})
+		if output := model.View(); !strings.Contains(output, "VISUAL FIXTURE — RADIATION 1.00") {
+			t.Fatalf("exact radiation fixture %v indication missing: %s", radiation, output)
+		}
 	}
 }
 

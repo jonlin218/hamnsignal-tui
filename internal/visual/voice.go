@@ -39,6 +39,7 @@ type Presenter struct {
 	targetWindVertical              float64
 	hasRiver                        bool
 	precipitation                   float64
+	radiation                       float64
 	motorikPressure                 float64
 	fixture                         VisualFixture
 	lastArrivalAt                   int64
@@ -130,6 +131,7 @@ func (p *Presenter) render(snapshot hamnsignal.StateSnapshot, width, height int,
 	field.add(riverField)
 	p.contributeRain(&field, now)
 	p.contributeArrival(&field, now)
+	p.contributeRadiation(&field, now)
 	p.contributeMotorik(&motorikField, now)
 	attenuateMotorikByRiver(&motorikField, riverField)
 	field.add(motorikField)
@@ -253,6 +255,16 @@ func (p *Presenter) updateEnvironment(snapshot hamnsignal.StateSnapshot, now tim
 	}
 	if p.fixture.Precipitation != nil {
 		p.precipitation = clamp(*p.fixture.Precipitation, 0, 10)
+	}
+	p.radiation = 0
+	if value, ok := snapshot.Weather["global_radiation"]; ok && value.Fields.NormalizedValue != nil {
+		radiation := float64(*value.Fields.NormalizedValue)
+		if !math.IsNaN(radiation) && !math.IsInf(radiation, 0) {
+			p.radiation = clamp(radiation, 0, 1)
+		}
+	}
+	if p.fixture.Radiation != nil {
+		p.radiation = clamp(*p.fixture.Radiation, 0, 1)
 	}
 	p.motorikPressure = 0
 	if value, ok := snapshot.Traffic["e45_queue"]; ok && value.Fields.NormalizedValue != nil {

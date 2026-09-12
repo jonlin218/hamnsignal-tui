@@ -104,12 +104,15 @@ func (m Model) View() string {
 	} else {
 		content = m.data.View()
 	}
-	parts := make([]string, 0, 3)
+	parts := make([]string, 0, 4)
 	if m.fixture.TrafficPressure != nil {
 		parts = append(parts, fmt.Sprintf("TRAFFIC %.2f", *m.fixture.TrafficPressure))
 	}
 	if m.fixture.Precipitation != nil {
 		parts = append(parts, fmt.Sprintf("RAIN %.2f", *m.fixture.Precipitation))
+	}
+	if m.fixture.Radiation != nil {
+		parts = append(parts, fmt.Sprintf("RADIATION %.2f", *m.fixture.Radiation))
 	}
 	if m.fixture.MotorikClick {
 		parts = append(parts, "MOTORIK CLICK")

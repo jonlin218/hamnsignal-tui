@@ -6,6 +6,7 @@ package visual
 type VisualFixture struct {
 	TrafficPressure *float64
 	Precipitation   *float64
+	Radiation       *float64
 	MotorikClick    bool
 }
 
@@ -18,6 +19,10 @@ func (f VisualFixture) clone() VisualFixture {
 	if f.Precipitation != nil {
 		precipitation := *f.Precipitation
 		clone.Precipitation = &precipitation
+	}
+	if f.Radiation != nil {
+		radiation := *f.Radiation
+		clone.Radiation = &radiation
 	}
 	return clone
 }

@@ -59,6 +59,7 @@ func parseOptions(arguments []string) (options, error) {
 	noAudio := flags.Bool("no-audio", false, "disable mpv audio playback")
 	traffic := flags.String("visual-traffic", "", "development-only normalized traffic pressure for VISUAL (0..1)")
 	rain := flags.String("visual-rain", "", "development-only precipitation for VISUAL (0..10)")
+	radiation := flags.String("visual-radiation", "", "development-only normalized radiation for VISUAL (0..1)")
 	motorikClick := flags.Bool("visual-motorik-click", false, "development-only 152 BPM motorik timing reference")
 	if err := flags.Parse(arguments); err != nil {
 		return options{}, err
@@ -72,8 +73,27 @@ func parseOptions(arguments []string) (options, error) {
 		return options{}, err
 	}
 	fixture.Precipitation = precipitation
+	visualRadiation, err := parseVisualRadiation(*radiation)
+	if err != nil {
+		return options{}, err
+	}
+	fixture.Radiation = visualRadiation
 	fixture.MotorikClick = *motorikClick
 	return options{events: *events, noAudio: *noAudio, fixture: fixture}, nil
+}
+
+func parseVisualRadiation(value string) (*float64, error) {
+	if value == "" {
+		return nil, nil
+	}
+	radiation, err := strconv.ParseFloat(value, 64)
+	if err != nil || math.IsNaN(radiation) || math.IsInf(radiation, 0) {
+		return nil, fmt.Errorf("--visual-radiation must be a number from 0 to 1")
+	}
+	if radiation < 0 || radiation > 1 {
+		return nil, fmt.Errorf("--visual-radiation must be between 0 and 1")
+	}
+	return &radiation, nil
 }
 
 func parseVisualRain(value string) (*float64, error) {

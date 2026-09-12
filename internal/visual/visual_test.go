@@ -1416,6 +1416,150 @@ func TestRainBasePlacementBroadensWithoutChangingCountOrWind(t *testing.T) {
 	t.Logf("200x60 count=8 base span: old %.0f..%.0f (%.0f), new %.0f..%.0f (%.0f) virtual dots", oldMin*width, oldMax*width, (oldMax-oldMin)*width, newMin*width, newMax*width, (newMax-newMin)*width)
 }
 
+func TestRadiationUsesOnlyNormalizedWeatherAndIsMonotonic(t *testing.T) {
+	now := time.Unix(500, 0)
+	missing := NewPresenter()
+	missing.Sync(hamnsignal.StateSnapshot{}, now)
+	blank := newDensityField(200, 60)
+	missing.contributeRadiation(&blank, now)
+	if totalFieldEnergy(blank) != 0 {
+		t.Fatal("missing radiation created a field")
+	}
+	for _, value := range []float64{0, .15, .5, .85, 1, 2} {
+		presenter := NewPresenter()
+		presenter.Sync(radiationSnapshot(value), now)
+		field := newDensityField(200, 60)
+		presenter.contributeRadiation(&field, now)
+		if value <= 0 && totalFieldEnergy(field) != 0 {
+			t.Fatalf("inactive radiation %.2f created a field", value)
+		}
+		if value > 0 && totalFieldEnergy(field) == 0 {
+			t.Fatalf("active radiation %.2f created no field", value)
+		}
+	}
+	low, high := radiationField(.15, now), radiationField(1, now)
+	_, lowBottom := fieldVerticalExtent(low, .022)
+	_, highBottom := fieldVerticalExtent(high, .022)
+	if totalFieldEnergy(high) <= totalFieldEnergy(low) || highBottom <= lowBottom {
+		t.Fatal("radiation strength did not deepen monotonically")
+	}
+	if !reflect.DeepEqual(radiationField(2, now), radiationField(1, now)) {
+		t.Fatal("out-of-range radiation did not clamp")
+	}
+}
+
+func TestRadiationFixtureIsolatedAndDeterministic(t *testing.T) {
+	now := time.Unix(500, 0)
+	fixtureValue := .85
+	presenter := NewPresenter()
+	presenter.SetFixture(VisualFixture{Radiation: &fixtureValue})
+	live := radiationSnapshot(0)
+	presenter.Sync(live, now)
+	first, repeat := newDensityField(200, 60), newDensityField(200, 60)
+	presenter.contributeRadiation(&first, now)
+	presenter.contributeRadiation(&repeat, now)
+	if totalFieldEnergy(first) == 0 || !reflect.DeepEqual(first, repeat) || *live.Weather["global_radiation"].Fields.NormalizedValue != 0 {
+		t.Fatal("radiation fixture was not isolated and deterministic")
+	}
+	canvas := NewCanvas(200, 60)
+	first.rasterize(&canvas)
+	if strings.Trim(canvas.Render(), "⠀\n") == "" || radiationColor != (fieldColor{178, 168, 146}) {
+		t.Fatal("meaningful radiation did not retain its rasterized colour identity")
+	}
+}
+
+func TestRadiationFixtureExactUpperBoundReachesRenderer(t *testing.T) {
+	now := time.Unix(500, 0)
+	live := radiationSnapshot(0)
+	for _, value := range []float64{0, .999, 1} {
+		presenter := NewPresenter()
+		presenter.SetFixture(VisualFixture{Radiation: &value})
+		presenter.Sync(live, now)
+		if presenter.radiation != value {
+			t.Fatalf("fixture value %v changed before radiation rendering: got=%v", value, presenter.radiation)
+		}
+		field := newDensityField(200, 60)
+		presenter.contributeRadiation(&field, now)
+		if value == 0 && totalFieldEnergy(field) != 0 {
+			t.Fatal("explicit zero radiation fixture created a field")
+		}
+		if value > 0 && totalFieldEnergy(field) == 0 {
+			t.Fatalf("radiation fixture %v reached the renderer but created no field", value)
+		}
+		if value > 0 && !reflect.DeepEqual(field, radiationField(value, now)) {
+			t.Fatalf("fixture radiation %v did not match the direct renderer input", value)
+		}
+	}
+}
+
+func TestRadiationDiagnostics(t *testing.T) {
+	now := time.Unix(500, 0)
+	for _, value := range []float64{0, .15, .5, .85, 1} {
+		field := radiationField(value, now)
+		nonzero, peak := 0, 0.0
+		for _, density := range field.values {
+			if density > 0 {
+				nonzero++
+				if density > peak {
+					peak = density
+				}
+			}
+		}
+		_, bottom := fieldVerticalExtent(field, .022)
+		typical := 0.0
+		if nonzero > 0 {
+			typical = totalFieldEnergy(field) / float64(nonzero)
+		}
+		run, gaps := radiationTopRun(field, .035)
+		t.Logf("radiation=%.2f nonzero=%d bottom=%d peak=%.4f typical=%.5f top-run=%d gaps=%d", value, nonzero, bottom, peak, typical, run, gaps)
+	}
+}
+
+func TestRadiationTopEdgeRetainsNegativeSpace(t *testing.T) {
+	now := time.Unix(500, 0)
+	for _, value := range []float64{.15, .5, .85, 1} {
+		field := radiationField(value, now)
+		run, gaps := radiationTopRun(field, .035)
+		if gaps == 0 || run >= field.width*3/5 {
+			t.Fatalf("radiation %.2f sealed the upper edge: run=%d gaps=%d width=%d", value, run, gaps, field.width)
+		}
+	}
+}
+
+func radiationTopRun(field densityField, threshold float64) (longest, gaps int) {
+	run, inGap := 0, false
+	for x := 0; x < field.width; x++ {
+		if field.value(x, 0) >= threshold {
+			run++
+			if run > longest {
+				longest = run
+			}
+			inGap = false
+		} else {
+			if !inGap {
+				gaps++
+				inGap = true
+			}
+			run = 0
+		}
+	}
+	return longest, gaps
+}
+
+func radiationSnapshot(value float64) hamnsignal.StateSnapshot {
+	key := "global_radiation"
+	normalized := hamnsignal.Number(value)
+	return hamnsignal.StateSnapshot{Weather: map[string]hamnsignal.EnvironmentalValue{key: {Fields: hamnsignal.EnvironmentalFields{Key: &key, NormalizedValue: &normalized}}}}
+}
+
+func radiationField(value float64, now time.Time) densityField {
+	presenter := NewPresenter()
+	presenter.Sync(radiationSnapshot(value), now)
+	field := newDensityField(200, 60)
+	presenter.contributeRadiation(&field, now)
+	return field
+}
+
 func motorikGlyphCanvas(pressure float64, now time.Time, width, height int) (Canvas, densityField, densityField) {
 	presenter := NewPresenter()
 	presenter.Sync(motorikSnapshot(pressure), now)
